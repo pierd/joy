@@ -447,4 +447,37 @@ mod tests {
         l!("1.5.", lit(1.5), Token::Dot);
         l!("{1.5}", Token::SetStart, lit(1.5), Token::SetEnd);
     }
+
+    #[test]
+    fn it_lexes_example_library() {
+        l!(
+            r#"
+            LIBRA (* queue *)
+
+            HIDE
+            error   == "non_empty queue needed for " putchars putchars newline abort;
+            prepare == [null] [swap reverse] [] ifte
+            IN
+            q-new   == [] [];
+            q-add   == swap [swons] dip;
+            q-addl  == swap [shunt] dip;
+            q-null  == prepare dup null;
+            q-front == prepare [null] ["q-front" error] [dup first] ifte;
+            q-rem   == prepare [null] ["q-rem "  error] [unswons  ] ifte
+            END.
+            "#,
+            Keyword::Libra.into(),
+            Keyword::Hide.into(),
+            sym("error"), sym("=="), lit("non_empty queue needed for ".to_string()), sym("putchars"), sym("putchars"), sym("newline"), sym("abort"), Token::SemiColon,
+            sym("prepare"), sym("=="), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, sym("swap"), sym("reverse"), Token::ListEnd, Token::ListStart, Token::ListEnd, sym("ifte"),
+            Keyword::In.into(),
+            sym("q-new"), sym("=="), Token::ListStart, Token::ListEnd, Token::ListStart, Token::ListEnd, Token::SemiColon,
+            sym("q-add"), sym("=="), sym("swap"), Token::ListStart, sym("swons"), Token::ListEnd, sym("dip"), Token::SemiColon,
+            sym("q-addl"), sym("=="), sym("swap"), Token::ListStart, sym("shunt"), Token::ListEnd, sym("dip"), Token::SemiColon,
+            sym("q-null"), sym("=="), sym("prepare"), sym("dup"), sym("null"), Token::SemiColon,
+            sym("q-front"), sym("=="), sym("prepare"), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, lit("q-front".to_string()), sym("error"), Token::ListEnd, Token::ListStart, sym("dup"), sym("first"), Token::ListEnd, sym("ifte"), Token::SemiColon,
+            sym("q-rem"), sym("=="), sym("prepare"), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, lit("q-rem ".to_string()), sym("error"), Token::ListEnd, Token::ListStart, sym("unswons"), Token::ListEnd, sym("ifte"),
+            Keyword::End.into(), Token::Dot
+        )
+    }
 }
