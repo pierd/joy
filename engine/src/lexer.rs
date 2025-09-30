@@ -1,36 +1,44 @@
 use thiserror::Error;
 
+use crate::either::Either;
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
-    Dot,
-    SemiColon,
     Keyword(Keyword),
+    // TODO: interning or SmolStr
     Symbol(String),
     Literal(Literal),
+    Dot,
+    SemiColon,
     ListStart,
     ListEnd,
     SetStart,
     SetEnd,
 }
+impl From<Keyword> for Token {
+    fn from(k: Keyword) -> Token {
+        Token::Keyword(k)
+    }
+}
+impl From<Literal> for Token {
+    fn from(l: Literal) -> Self {
+        Token::Literal(l)
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {
+    Const,
     Define,
     Libra,
     Hide,
     In,
     End,
 }
-
-impl Into<Token> for Keyword {
-    fn into(self) -> Token {
-        Token::Keyword(self)
-    }
-}
-
 impl Keyword {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
+            "CONST" => Some(Keyword::Const),
             "DEFINE" => Some(Keyword::Define),
             "LIBRA" => Some(Keyword::Libra),
             "HIDE" => Some(Keyword::Hide),
@@ -46,82 +54,135 @@ pub enum Literal {
     Char(char),
     String(String),
     Float(f64),
-    Integer(i64),
+    Integer(isize),
 }
-
-impl Into<Token> for Literal {
-    fn into(self) -> Token {
-        Token::Literal(self)
+impl From<char> for Literal {
+    fn from(c: char) -> Self {
+        Literal::Char(c)
     }
 }
-
-impl Into<Literal> for char {
-    fn into(self) -> Literal {
-        Literal::Char(self)
+impl From<String> for Literal {
+    fn from(s: String) -> Self {
+        Literal::String(s)
     }
 }
-
-impl Into<Literal> for String {
-    fn into(self) -> Literal {
-        Literal::String(self)
+impl From<f64> for Literal {
+    fn from(f: f64) -> Self {
+        Literal::Float(f)
     }
 }
-
-impl Into<Literal> for f64 {
-    fn into(self) -> Literal {
-        Literal::Float(self)
+impl From<isize> for Literal {
+    fn from(i: isize) -> Self {
+        Literal::Integer(i)
     }
 }
-
-impl Into<Literal> for i64 {
-    fn into(self) -> Literal {
-        Literal::Integer(self)
-    }
-}
-
 impl Literal {
-    fn integer(negative: bool, value: i64) -> Self {
+    fn integer(negative: bool, value: isize) -> Self {
         Literal::Integer(value * if negative { -1 } else { 1 })
     }
 
-    fn float(negative: bool, integer: i64, fractional: i64, fractional_len: usize) -> Self {
+    fn float(negative: bool, integer: isize, fractional: isize, fractional_len: usize) -> Self {
         Literal::Float((integer as f64 + fractional as f64 / 10f64.powi(fractional_len as i32)) * if negative { -1.0 } else { 1.0 })
     }
 }
 
 #[derive(Debug, Error, PartialEq, Clone)]
 pub enum LexerError {
+    #[error("invalid character code: {0}")]
+    InvalidCharacterCode(u32),
     #[error("unknown error: {0}")]
     Unknown(String),
 }
 
-#[derive(Debug, Default, Clone)]
-enum LexerState {
-    #[default]
-    Empty,
-
-    /// found '(', now expecting '*' to start a comment
-    FoundOpenParen,
-    /// in a comment, accumulating until '*' is found
-    InComment,
-    /// found '*' while in a comment, now expecting ')' to end a comment
-    FoundCloseStarMaybe,
-    
-    InSymbolOrKeyword(String),
-    /// found '\'' found, now expecting a character for the literal
-    Quote,
-    /// found '"', string literal, accumulating until '"'
-    InString(String),
-
-    /// found '-', now expecting a number for the literal or a symbol
-    FoundMinus,
-    InNumber { negative: bool, value: i64 },
-    /// found '.' while in a number, either float or ended with an integer
-    InNumberFoundDot { negative: bool, value: i64 },
-    InFloat { negative: bool, integer: i64, fractional: i64, fractional_len: usize },
+struct EscapedCharResult {
+    character: char,
+    remaining_char: Option<char>,
+}
+impl From<char> for EscapedCharResult {
+    fn from(c: char) -> Self {
+        EscapedCharResult { character: c, remaining_char: None }
+    }
+}
+impl From<(char, char)> for EscapedCharResult {
+    fn from((c, remaining_char): (char, char)) -> Self {
+        EscapedCharResult { character: c, remaining_char: Some(remaining_char) }
+    }
 }
 
-fn one_char_token(c: char) -> Option<Token> {
+#[derive(Debug, Default, PartialEq, Clone)]
+enum EscapedCharState {
+    #[default]
+    Empty,
+    Octal { val: u32, len: usize },
+    Hex { val: u32, len: usize },
+    Unicode { val: u32, len: usize },
+}
+impl EscapedCharState {
+    fn to_char(val: u32) -> Result<char, LexerError> {
+        char::from_u32(val).ok_or(LexerError::InvalidCharacterCode(val))
+    }
+
+    fn handle_char(self, c: char) -> Result<Either<Self, EscapedCharResult>, LexerError> {
+        match self {
+            Self::Empty => match c {
+                '0'..='7' => Ok(Either::Left(Self::Octal { val: c.to_digit(8).expect("invalid octal"), len: 1 })),
+                'x' => Ok(Either::Left(Self::Hex { val: 0, len: 0 })),
+                'u' => Ok(Either::Left(Self::Unicode { val: 0, len: 0 })),
+                '\'' | '"' | '\\' => Ok(Either::Right(c.into())),
+                'n' => Ok(Either::Right('\n'.into())),
+                'r' => Ok(Either::Right('\r'.into())),
+                't' => Ok(Either::Right('\t'.into())),
+                _ => Err(LexerError::Unknown(format!("Unexpected character: {}", c))),
+            },
+            Self::Octal { val, len } => match c {
+                '0'..='7' => {
+                    let val = val * 8 + c.to_digit(8).expect("invalid octal");
+                    let len = len + 1;
+                    if len == 3 {
+                        Ok(Either::Right(Self::to_char(val)?.into()))
+                    } else {
+                        Ok(Either::Left(Self::Octal { val, len }))
+                    }
+                }
+                _ => Ok(Either::Right((Self::to_char(val)?, c).into())),
+            },
+            Self::Hex { val, len } => match c {
+                '0'..='9' | 'A'..='F' | 'a'..='f' => {
+                    let val = val * 16 + c.to_digit(16).expect("invalid hex");
+                    let len = len + 1;
+                    if len == 2 {
+                        Ok(Either::Right(Self::to_char(val)?.into()))
+                    } else {
+                        Ok(Either::Left(Self::Hex { val, len }))
+                    }
+                }
+                _ => Err(LexerError::Unknown(format!("Unexpected character: {}", c))),
+            },
+            Self::Unicode { val, len } => match c {
+                '0'..='9' | 'A'..='F' | 'a'..='f' => {
+                    let val = val * 16 + c.to_digit(16).expect("invalid hex");
+                    let len = len + 1;
+                    if len == 4 {
+                        Ok(Either::Right(Self::to_char(val)?.into()))
+                    } else {
+                        Ok(Either::Left(Self::Unicode { val, len }))
+                    }
+                }
+                _ => Err(LexerError::Unknown(format!("Unexpected character: {}", c))),
+            },
+        }
+    }
+
+    fn finish(self) -> Result<char, LexerError> {
+        if let Self::Octal { val, .. } = self {
+            Ok(Self::to_char(val)?)
+        } else {
+            Err(LexerError::Unknown("Invalid escaped char state".to_string()))
+        }
+    }
+}
+
+fn parse_restricted_char_token(c: char) -> Option<Token> {
     match c {
         '.' => Some(Token::Dot),
         ';' => Some(Token::SemiColon),
@@ -133,48 +194,92 @@ fn one_char_token(c: char) -> Option<Token> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+enum LexerState {
+    #[default]
+    Empty,
+
+    /// found '#', now skipping until '\n'
+    InLineComment,
+
+    /// found '(', now expecting '*' to start a comment
+    FoundOpenParen,
+    /// in a comment, accumulating until '*' is found
+    InBlockComment,
+    /// found '*' while in a comment, now expecting ')' to end a comment
+    FoundCloseStarMaybe,
+    
+    InSymbolOrKeyword(String),
+    /// found '\'', now expecting a character for the literal
+    Quote,
+    /// found '\' after a quote, now accumulating the escaped character
+    QuoteEscapedChar(EscapedCharState),
+    /// found '"', string literal, accumulating until '"'
+    InString(String),
+    /// found '\' in a string, now accumulating the escaped character
+    InStringWithEscapedChar(String, EscapedCharState),
+
+    /// found '-', now expecting a number for the literal or a symbol
+    FoundMinus,
+    InNumber { negative: bool, value: isize },
+    /// found '.' while in a number, either float or ended with an integer
+    InNumberFoundDot { negative: bool, value: isize },
+    InFloat { negative: bool, integer: isize, fractional: isize, fractional_len: usize },
+}
 impl LexerState {
     fn handle_char(self, c: char) -> Result<(Self, [Option<Token>; 2]), LexerError> {
         match self {
-            LexerState::Empty => {
+            Self::Empty => {
                 if c.is_whitespace() {
                     Ok((self, [None, None]))
-                } else if let Some(token) = one_char_token(c) {
-                    Ok((LexerState::Empty, [Some(token), None]))
+                } else if let Some(token) = parse_restricted_char_token(c) {
+                    Ok((Self::Empty, [Some(token), None]))
+                } else if c == '#' {
+                    Ok((Self::InLineComment, [None, None]))
                 } else if c == '(' {
-                    Ok((LexerState::FoundOpenParen, [None, None]))
+                    Ok((Self::FoundOpenParen, [None, None]))
                 } else if c == '\'' {
-                    Ok((LexerState::Quote, [None, None]))
+                    Ok((Self::Quote, [None, None]))
                 } else if c == '"' {
-                    Ok((LexerState::InString(String::new()), [None, None]))
+                    Ok((Self::InString(String::new()), [None, None]))
                 } else if c == '-' {
-                    Ok((LexerState::FoundMinus, [None, None]))
+                    Ok((Self::FoundMinus, [None, None]))
                 } else if let Some(digit) = c.to_digit(10) {
-                    Ok((LexerState::InNumber { negative: false, value: digit as i64 }, [None, None]))
+                    Ok((Self::InNumber { negative: false, value: digit as isize }, [None, None]))
                 } else {
-                    Ok((LexerState::InSymbolOrKeyword(c.to_string()), [None, None]))
+                    Ok((Self::InSymbolOrKeyword(c.to_string()), [None, None]))
                 }
             },
-            LexerState::FoundOpenParen => {
+            Self::InLineComment => {
+                Ok((
+                    if c == '\n' {
+                        Self::Empty
+                    } else {
+                        Self::InLineComment
+                    },
+                    [None, None]
+                ))
+            },
+            Self::FoundOpenParen => {
                 Ok(
                     if c == '*' {
-                        (LexerState::InComment, [None, None])
+                        (Self::InBlockComment, [None, None])
                     } else if c.is_whitespace() {
-                        (LexerState::Empty, [Some(Token::Symbol("(".to_string())), None])
-                    } else if let Some(token) = one_char_token(c) {
-                        (LexerState::Empty, [Some(token), None])
+                        (Self::Empty, [Some(Token::Symbol("(".to_string())), None])
+                    } else if let Some(token) = parse_restricted_char_token(c) {
+                        (Self::Empty, [Some(token), None])
                     } else {
                         let mut s = "(".to_string();
                         s.push(c);
-                        (LexerState::InSymbolOrKeyword(s), [None, None])
+                        (Self::InSymbolOrKeyword(s), [None, None])
                     }
                 )
             },
-            LexerState::InComment => {
+            Self::InBlockComment => {
                 Ok((
                     if c == '*' {
                         // found '*', so we're now expecting ')' to end the comment
-                        LexerState::FoundCloseStarMaybe
+                        Self::FoundCloseStarMaybe
                     } else {
                         // still in the comment
                         self
@@ -182,47 +287,107 @@ impl LexerState {
                     [None, None]
                 ))
             },
-            LexerState::FoundCloseStarMaybe => {
+            Self::FoundCloseStarMaybe => {
                 Ok((
                     if c == ')' {
                         // comment ended
-                        LexerState::Empty
+                        Self::Empty
                     } else {
                         // no close paren after '*', so we're still in the comment
-                        LexerState::InComment
+                        Self::InBlockComment
                     },
                     [None, None]
                 ))
             },
-            LexerState::InSymbolOrKeyword(s) => {
-                Self::continue_symbol_or_keyword(s, c)
+            Self::InSymbolOrKeyword(mut s) => {
+                if c.is_whitespace() || c == '#' || parse_restricted_char_token(c).is_some() {
+                    Ok((
+                        if c == '#' {
+                            Self::InLineComment
+                        } else {
+                            Self::Empty
+                        },
+                        [
+                            Some(
+                                if let Some(keyword) = Keyword::from_str(&s) {
+                                    Token::Keyword(keyword)
+                                } else {
+                                    Token::Symbol(s)
+                                }
+                            ),
+                            parse_restricted_char_token(c)
+                        ]
+                    ))
+                } else {
+                    s.push(c);
+                    Ok((Self::InSymbolOrKeyword(s), [None, None]))
+                }
             },
-            LexerState::Quote => {
-                Ok((LexerState::Empty, [Some(Token::Literal(Literal::Char(c))), None]))
+            Self::Quote => {
+                if c == '\\' {
+                    Ok((Self::QuoteEscapedChar(EscapedCharState::default()), [None, None]))
+                } else {
+                    Ok((Self::Empty, [Some(Token::Literal(Literal::Char(c))), None]))
+                }
             },
-            LexerState::InString(mut s) => {
+            Self::QuoteEscapedChar(state) => {
+                match state.handle_char(c)? {
+                    Either::Left(state) => Ok((Self::QuoteEscapedChar(state), [None, None])),
+                    Either::Right(EscapedCharResult { character, remaining_char }) => {
+                        let (state, last_token) = {
+                            if let Some(remaining_char) = remaining_char {
+                                let (state, [token0, token1]) = Self::Empty.handle_char(remaining_char)?;
+                                assert_eq!(token1, None);
+                                (state, token0)
+                            } else {
+                                (Self::Empty, None)
+                            }
+                        };
+                        Ok((state, [Some(Token::Literal(Literal::Char(character))), last_token]))
+                    }
+                }
+            },
+            Self::InString(mut s) => {
                 Ok(
                     if c == '"' {
-                        (LexerState::Empty, [Some(Token::Literal(Literal::String(s))), None])
+                        (Self::Empty, [Some(Token::Literal(Literal::String(s))), None])
+                    } else if c == '\\' {
+                        (Self::InStringWithEscapedChar(s, EscapedCharState::default()), [None, None])
                     } else {
                         s.push(c);
-                        (LexerState::InString(s), [None, None])
+                        (Self::InString(s), [None, None])
                     }
                 )
             },
-            LexerState::FoundMinus => {
-                if let Some(digit) = c.to_digit(10) {
-                    Ok((Self::InNumber { negative: true, value: digit as i64 }, [None, None]))
-                } else {
-                    Self::continue_symbol_or_keyword("-".to_string(), c)
+            Self::InStringWithEscapedChar(mut s, state) => {
+                match state.handle_char(c)? {
+                    Either::Left(state) => Ok((Self::InStringWithEscapedChar(s, state), [None, None])),
+                    Either::Right(EscapedCharResult { character, remaining_char }) => {
+                        s.push(character);
+                        let new_state = Self::InString(s);
+                        if let Some(remaining_char) = remaining_char {
+                            new_state.handle_char(remaining_char)
+                        } else {
+                            Ok((new_state, [None, None]))
+                        }
+                    }
                 }
             },
-            LexerState::InNumber { negative, value } => {
+            Self::FoundMinus => {
                 if let Some(digit) = c.to_digit(10) {
-                    Ok((Self::InNumber { negative, value: value * 10 + digit as i64 }, [None, None]))
+                    Ok((Self::InNumber { negative: true, value: digit as isize }, [None, None]))
+                } else {
+                    Self::InSymbolOrKeyword("-".to_string()).handle_char(c)
+                }
+            },
+            Self::InNumber { negative, value } => {
+                if let Some(digit) = c.to_digit(10) {
+                    Ok((Self::InNumber { negative, value: value * 10 + digit as isize }, [None, None]))
                 } else if c == '.' {
                     Ok((Self::InNumberFoundDot { negative, value }, [None, None]))
-                } else if let Some(token) = one_char_token(c) {
+                } else if c == '#' {
+                    Ok((Self::InLineComment, [Some(Token::Literal(Literal::integer(negative, value))), None]))
+                } else if let Some(token) = parse_restricted_char_token(c) {
                     Ok((
                         Self::Empty,
                         [
@@ -234,12 +399,16 @@ impl LexerState {
                     Err(LexerError::Unknown("Expected digit or '.'".to_string()))
                 }
             },
-            LexerState::InNumberFoundDot { negative, value } => {
+            Self::InNumberFoundDot { negative, value } => {
                 if let Some(digit) = c.to_digit(10) {
-                    Ok((Self::InFloat { negative, integer: value, fractional: digit as i64, fractional_len: 1 }, [None, None]))
-                } else if c.is_whitespace() {
+                    Ok((Self::InFloat { negative, integer: value, fractional: digit as isize, fractional_len: 1 }, [None, None]))
+                } else if c.is_whitespace() || c == '#' {
                     Ok((
-                        Self::Empty,
+                        if c == '#' {
+                            Self::InLineComment
+                        } else {
+                            Self::Empty
+                        },
                         [
                             Some(Token::Literal(Literal::integer(negative, value))),
                             Some(Token::Dot),
@@ -249,15 +418,19 @@ impl LexerState {
                     Err(LexerError::Unknown("Unexpected character".to_string()))
                 }
             },
-            LexerState::InFloat { negative, integer, fractional, fractional_len } => {
+            Self::InFloat { negative, integer, fractional, fractional_len } => {
                 if let Some(digit) = c.to_digit(10) {
-                    Ok((Self::InFloat { negative, integer, fractional: fractional * 10 + digit as i64, fractional_len: fractional_len + 1 }, [None, None]))
-                } else if c.is_whitespace() || one_char_token(c).is_some() {
+                    Ok((Self::InFloat { negative, integer, fractional: fractional * 10 + digit as isize, fractional_len: fractional_len + 1 }, [None, None]))
+                } else if c.is_whitespace() || c == '#' || parse_restricted_char_token(c).is_some() {
                     Ok((
-                        Self::Empty,
+                        if c == '#' {
+                            Self::InLineComment
+                        } else {
+                            Self::Empty
+                        },
                         [
                             Some(Token::Literal(Literal::float(negative, integer, fractional, fractional_len))),
-                            one_char_token(c),
+                            parse_restricted_char_token(c),
                         ]
                     ))
                 } else {
@@ -267,37 +440,19 @@ impl LexerState {
         }
     }
 
-    fn continue_symbol_or_keyword(mut s: String, c: char) -> Result<(Self, [Option<Token>; 2]), LexerError> {
-        if c.is_whitespace() || one_char_token(c).is_some() {
-            Ok((
-                Self::Empty,
-                [
-                    Some(
-                        if let Some(keyword) = Keyword::from_str(&s) {
-                            Token::Keyword(keyword)
-                        } else {
-                            Token::Symbol(s)
-                        }
-                    ),
-                    one_char_token(c)
-                ]
-            ))
-        } else {
-            s.push(c);
-            Ok((Self::InSymbolOrKeyword(s), [None, None]))
-        }
-    }
-
     fn finish(self) -> Result<[Option<Token>; 2], LexerError> {
         match self {
             Self::Empty => {
                 Ok([None, None])
             },
+            Self::InLineComment => {
+                Ok([None, None])
+            },
             Self::FoundOpenParen => {
                 Ok([Some(Token::Symbol("(".to_string())), None])
             },
-            Self::InComment => {
-                Err(LexerError::Unknown("InComment".to_string()))
+            Self::InBlockComment => {
+                Err(LexerError::Unknown("InBlockComment".to_string()))
             },
             Self::FoundCloseStarMaybe => {
                 Err(LexerError::Unknown("FoundCloseStarMaybe".to_string()))
@@ -308,9 +463,15 @@ impl LexerState {
             Self::Quote => {
                 Err(LexerError::Unknown("Quote".to_string()))
             },
-            Self::InString(s) => {
+            Self::QuoteEscapedChar(state) => {
+                Ok([Some(Token::Literal(Literal::Char(state.finish()?))), None])
+            }
+            Self::InString(_) => {
                 Err(LexerError::Unknown("InString".to_string()))
             },
+            Self::InStringWithEscapedChar(_, _) => {
+                Err(LexerError::Unknown("InStringWithEscapedChar".to_string()))
+            }
             Self::FoundMinus => {
                 Self::finish_symbol_or_keyword("-".to_string())
             },
@@ -335,10 +496,10 @@ impl LexerState {
     }
 }
 
-pub fn lex(input: &str) -> Result<Vec<Token>, LexerError> {
+pub fn lex(input: impl AsRef<str>) -> Result<Vec<Token>, LexerError> {
     let mut tokens = Vec::new();
     let mut state = LexerState::default();
-    for c in input.chars() {
+    for c in input.as_ref().chars() {
         let (new_state, new_tokens) = state.handle_char(c)?;
         state = new_state;
         tokens.extend(new_tokens.into_iter().filter_map(|token| token));
@@ -354,7 +515,7 @@ mod tests {
 
     macro_rules! l {
         ($s:expr, $($expected:expr),*) => {
-            assert_eq!(lex($s), Ok(vec![$($expected),*]));
+            assert_eq!(lex($s), Ok(vec![$($expected),*]))
         };
     }
 
@@ -368,6 +529,7 @@ mod tests {
 
     #[test]
     fn it_lexes_simple_keyword() {
+        l!("CONST", Keyword::Const.into());
         l!("DEFINE", Keyword::Define.into());
         l!("LIBRA", Keyword::Libra.into());
         l!("HIDE", Keyword::Hide.into());
@@ -404,6 +566,11 @@ mod tests {
         l!("(* foo *) bar", sym("bar"));
         l!("( foo * bar * baz )", sym("("), sym("foo"), sym("*"), sym("bar"), sym("*"), sym("baz"), sym(")"));
         l!("(**) foo (* *)", sym("foo"));
+        l!("# foo\nbar", sym("bar"));
+        l!("xxx# foo\nbar", sym("xxx"), sym("bar"));
+        l!("12# comment", lit(12));
+        l!("12.5# comment", lit(12.5));
+        l!("12.# comment", lit(12), Token::Dot);
     }
 
     #[test]
@@ -412,6 +579,14 @@ mod tests {
         l!("'b test", lit('b'), sym("test"));
         l!("'c", lit('c'));
         l!("''", lit('\''));
+        l!("'\\t", lit('\t'));
+        l!("'\\n", lit('\n'));
+        l!("'\\r", lit('\r'));
+        l!("'\\0", lit('\0'));
+        l!("'\\17", lit('\x0f'));
+        l!("'\\017", lit('\x0f'));
+        l!("'\\x0f", lit('\x0f'));
+        l!("'\\u000f", lit('\x0f'));
     }
 
     #[test]
@@ -420,6 +595,8 @@ mod tests {
         l!("\"bar baz\"", lit("bar baz".to_string()));
         l!("\"baz\"", lit("baz".to_string()));
         l!("\"\"", lit("".to_string()));
+        l!("\"\\17\"", lit("\x0f".to_string()));
+        l!("\"\\\"\\t\\017\"", lit("\"\t\x0f".to_string()));
     }
 
     #[test]
@@ -446,6 +623,7 @@ mod tests {
         l!("1.25", lit(1.25));
         l!("1.5.", lit(1.5), Token::Dot);
         l!("{1.5}", Token::SetStart, lit(1.5), Token::SetEnd);
+        l!("1;2;3", lit(1), Token::SemiColon, lit(2), Token::SemiColon, lit(3));
     }
 
     #[test]
