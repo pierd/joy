@@ -509,6 +509,52 @@ pub fn lex(input: impl AsRef<str>) -> Result<Vec<Token>, LexerError> {
     Ok(tokens)
 }
 
+struct LexerIterator<I: Iterator<Item = char>> {
+    iter: I,
+    state: Option<LexerState>,
+    pending_token: Option<Token>,
+}
+impl<I: Iterator<Item = char>> LexerIterator<I> {
+    fn new(iter: I) -> Self {
+        Self { iter, state: Some(LexerState::default()), pending_token: None }
+    }
+}
+impl<I: Iterator<Item = char>> Iterator for LexerIterator<I> {
+    type Item = Result<Token, LexerError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(token) = self.pending_token.take() {
+            return Some(Ok(token));
+        }
+        let mut new_tokens = [None, None];
+        while new_tokens.iter().all(|token| token.is_none()) {
+            let state = self.state.take()?;
+            new_tokens = if let Some(c) = self.iter.next() {
+                let output = match state.handle_char(c) {
+                    Ok(output) => output,
+                    Err(e) => return Some(Err(e)),
+                };
+                self.state = Some(output.0);
+                output.1
+            } else {
+                match state.finish() {
+                    Ok(output) => output,
+                    Err(e) => return Some(Err(e)),
+                }
+            };
+        }
+        let [token0, token1] = new_tokens;
+        self.pending_token = token1;
+        token0.map(Ok)
+    }
+}
+
+pub trait LexableIterator: Sized + Iterator<Item = char> {
+    fn lex(self) -> LexerIterator<Self> {
+        LexerIterator::new(self)
+    }
+}
+impl<I: Iterator<Item = char>> LexableIterator for I {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +703,41 @@ mod tests {
             sym("q-rem"), sym("=="), sym("prepare"), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, lit("q-rem ".to_string()), sym("error"), Token::ListEnd, Token::ListStart, sym("unswons"), Token::ListEnd, sym("ifte"),
             Keyword::End.into(), Token::Dot
         )
+    }
+
+    #[test]
+    fn it_lexes_example_library_with_iterator() {
+        let input =
+            r#"
+            LIBRA (* queue *)
+
+            HIDE
+            error   == "non_empty queue needed for " putchars putchars newline abort;
+            prepare == [null] [swap reverse] [] ifte
+            IN
+            q-new   == [] [];
+            q-add   == swap [swons] dip;
+            q-addl  == swap [shunt] dip;
+            q-null  == prepare dup null;
+            q-front == prepare [null] ["q-front" error] [dup first] ifte;
+            q-rem   == prepare [null] ["q-rem "  error] [unswons  ] ifte
+            END.
+            "#;
+        let expected = vec![
+            Keyword::Libra.into(),
+            Keyword::Hide.into(),
+            sym("error"), sym("=="), lit("non_empty queue needed for ".to_string()), sym("putchars"), sym("putchars"), sym("newline"), sym("abort"), Token::SemiColon,
+            sym("prepare"), sym("=="), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, sym("swap"), sym("reverse"), Token::ListEnd, Token::ListStart, Token::ListEnd, sym("ifte"),
+            Keyword::In.into(),
+            sym("q-new"), sym("=="), Token::ListStart, Token::ListEnd, Token::ListStart, Token::ListEnd, Token::SemiColon,
+            sym("q-add"), sym("=="), sym("swap"), Token::ListStart, sym("swons"), Token::ListEnd, sym("dip"), Token::SemiColon,
+            sym("q-addl"), sym("=="), sym("swap"), Token::ListStart, sym("shunt"), Token::ListEnd, sym("dip"), Token::SemiColon,
+            sym("q-null"), sym("=="), sym("prepare"), sym("dup"), sym("null"), Token::SemiColon,
+            sym("q-front"), sym("=="), sym("prepare"), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, lit("q-front".to_string()), sym("error"), Token::ListEnd, Token::ListStart, sym("dup"), sym("first"), Token::ListEnd, sym("ifte"), Token::SemiColon,
+            sym("q-rem"), sym("=="), sym("prepare"), Token::ListStart, sym("null"), Token::ListEnd, Token::ListStart, lit("q-rem ".to_string()), sym("error"), Token::ListEnd, Token::ListStart, sym("unswons"), Token::ListEnd, sym("ifte"),
+            Keyword::End.into(), Token::Dot
+        ];
+        let actual = input.chars().lex().collect::<Result<Vec<Token>, LexerError>>().unwrap();
+        assert_eq!(actual, expected);
     }
 }
