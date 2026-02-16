@@ -19,28 +19,36 @@
 ///   - "CONST ..public_defs.. END|."
 ///   - "INLINE ..public_defs.. END|."
 ///     5 above become: "[..private_defs..] [..public_defs..] [] MODULE"
-///   note: if there are no private_defs then given list is simply empty
-///   note2: as input private_defs and public_defs are definitions but after parsing they are
-///          regular Joy source code
-///   note3: using "MODULE" for the builtin since it's already a restricted keyword so it won't
-///          normally appear in Joy source code
+///   - note: if there are no private_defs then given list is simply empty
+///   - note2:
+///     as input private_defs and public_defs are definitions but after parsing they are
+///     regular Joy source code
+///   - note3:
+///     using "MODULE" for the builtin since it's already a restricted keyword so it won't
+///     normally appear in Joy source code
 ///
 /// Both of the above allows the modified Joy code to be executed directly because definitions
 /// and modules stop being magical constructs and become regular Joy source code.
 use thiserror::Error;
 
-use crate::lexer::Token;
-use crate::symbol::Symbol;
+use crate::builtins::MODULE_CREATION_BUILTIN;
+use crate::lexer::{Keyword, Token, TokenType};
+use crate::symbol::{Symbol, symbol};
 use crate::value::Value;
 
 #[derive(Debug, Error, PartialEq, Clone)]
 pub enum ParserError {
     #[error("unexpected token: {0:#?}")]
     UnexpectedToken(Token),
+    #[error("unexpected token: {unexpected:#?}, expected tokens: {expected_tokens:#?}")]
+    UnexpectedTokenExpectedTokens {
+        unexpected: Token,
+        expected_tokens: Vec<TokenType>,
+    },
     #[error("unexpected end of input")]
     UnexpectedEndOfInput,
     #[error("unexpected end of input, expected tokens: {expected_tokens:#?}")]
-    UnexpectedEndOfInputExpectedTokens { expected_tokens: Vec<Token> },
+    UnexpectedEndOfInputExpectedTokens { expected_tokens: Vec<TokenType> },
     #[error("unknown error: {0}")]
     Unknown(String),
 }
@@ -54,16 +62,23 @@ enum ParserState {
     Module(Module),
     Definition(Definition),
 }
-impl From<SymbolOrQualifiedAccess> for ParserState {
-    fn from(value: SymbolOrQualifiedAccess) -> Self {
-        Self::SymbolOrQualifiedAccess(value)
-    }
+macro_rules! impl_From_for_ParserState {
+    ($t:ty, $v:ident, $e:expr) => {
+        impl From<$t> for ParserState {
+            fn from($v: $t) -> Self {
+                $e
+            }
+        }
+    };
 }
-impl From<Collection> for ParserState {
-    fn from(value: Collection) -> Self {
-        Self::Collection(value)
-    }
-}
+impl_From_for_ParserState!(
+    SymbolOrQualifiedAccess,
+    v,
+    ParserState::SymbolOrQualifiedAccess(v)
+);
+impl_From_for_ParserState!(Collection, v, ParserState::Collection(v));
+impl_From_for_ParserState!(Module, v, ParserState::Module(v));
+impl_From_for_ParserState!(Definition, v, ParserState::Definition(v));
 
 #[derive(Debug, Default, PartialEq, Clone)]
 struct SymbolOrQualifiedAccess {
@@ -101,7 +116,7 @@ impl SymbolOrQualifiedAccess {
     fn drain_all(&mut self) -> Vec<Value> {
         let mut values = vec![self.drain()];
         if self.trailing_dot {
-            values.push(Symbol::intern(".").into());
+            values.push(symbol(".").into());
         }
         values
     }
@@ -143,9 +158,16 @@ impl Collection {
             CollectionType::Set => Value::Set(items),
         }
     }
+    fn handle_sub_state_done(
+        &mut self,
+        values: Vec<Value>,
+    ) -> Result<Option<Vec<Value>>, ParserError> {
+        self.items.extend(values);
+        Ok(None)
+    }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Default, PartialEq, Clone)]
 struct Module {
     stage: ModuleStage,
     name: Option<Symbol>,
@@ -159,18 +181,163 @@ enum ModuleStage {
     ReadingPrivateDefs,
     ReadingPublicDefs,
 }
+impl Module {
+    fn public_unnamed() -> Self {
+        Self {
+            stage: ModuleStage::ReadingPublicDefs,
+            ..Default::default()
+        }
+    }
+    fn private_unnamed() -> Self {
+        Self {
+            stage: ModuleStage::ReadingPrivateDefs,
+            ..Default::default()
+        }
+    }
+    fn named() -> Self {
+        Self {
+            stage: ModuleStage::AwaitingName,
+            ..Default::default()
+        }
+    }
+
+    fn drain_values(&mut self) -> Vec<Value> {
+        vec![
+            Value::List(std::mem::take(&mut self.private_defs)),
+            Value::List(std::mem::take(&mut self.public_defs)),
+            Value::List(self.name.take().map(|s| vec![s.into()]).unwrap_or_default()),
+            symbol(MODULE_CREATION_BUILTIN).into(),
+        ]
+    }
+
+    fn handle_token(&mut self, token: Token) -> Result<ParserStateResult, ParserError> {
+        if self.stage == ModuleStage::AwaitingName {
+            if let Token::Symbol(sym) = token {
+                self.name = Some(sym);
+                self.stage = ModuleStage::ReadingPublicDefs;
+                Ok(ParserStateResult::continued())
+            } else {
+                Err(ParserError::UnexpectedTokenExpectedTokens {
+                    unexpected: token,
+                    expected_tokens: vec![TokenType::Symbol],
+                })
+            }
+        } else {
+            match token {
+                Token::Dot | Token::Keyword(Keyword::End) => {
+                    Ok(ParserStateResult::done().with_values(self.drain_values()))
+                }
+                Token::Keyword(Keyword::In) | Token::Keyword(Keyword::Public) => {
+                    self.stage = ModuleStage::ReadingPublicDefs;
+                    Ok(ParserStateResult::continued())
+                }
+                Token::Keyword(Keyword::Private) => {
+                    self.stage = ModuleStage::ReadingPrivateDefs;
+                    Ok(ParserStateResult::continued())
+                }
+                Token::SemiColon => Ok(ParserStateResult::continued()),
+                Token::Symbol(s) => Ok(ParserStateResult::forward_to(Definition::named(s))),
+                _ => Err(ParserError::UnexpectedToken(token)),
+            }
+        }
+    }
+    fn handle_sub_state_done(
+        &mut self,
+        values: Vec<Value>,
+    ) -> Result<Option<Vec<Value>>, ParserError> {
+        match self.stage {
+            ModuleStage::AwaitingName => unreachable!(),
+            ModuleStage::ReadingPrivateDefs => &mut self.private_defs,
+            ModuleStage::ReadingPublicDefs => &mut self.public_defs,
+        }
+        .extend(values);
+        Ok(None)
+    }
+    fn finish(self) -> Result<Vec<Value>, ParserError> {
+        Err(ParserError::UnexpectedEndOfInputExpectedTokens {
+            expected_tokens: if self.stage == ModuleStage::AwaitingName {
+                vec![TokenType::Symbol]
+            } else {
+                vec![
+                    TokenType::Symbol,
+                    TokenType::Dot,
+                    TokenType::Keyword(Keyword::End),
+                ]
+            },
+        })
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 struct Definition {
-    name: Option<Symbol>,
+    name: Symbol,
+    stage: DefinitionStage,
     terms: Vec<Value>,
 }
-#[derive(Debug, Default, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum DefinitionStage {
-    #[default]
-    AwaitingName,
     AwaitingEquals,
     ReadingTerms,
+}
+impl Definition {
+    fn named(name: impl Into<Symbol>) -> Self {
+        Self {
+            name: name.into(),
+            stage: DefinitionStage::AwaitingEquals,
+            terms: Default::default(),
+        }
+    }
+
+    fn drain_values(&mut self) -> Vec<Value> {
+        vec![
+            Value::List(std::mem::take(&mut self.terms)),
+            Value::List(vec![self.name.clone().into()]),
+            symbol("==").into(),
+        ]
+    }
+
+    fn handle_token(&mut self, token: Token) -> Result<ParserStateResult, ParserError> {
+        match (self.stage, token) {
+            (DefinitionStage::AwaitingEquals, Token::Symbol(s)) if s == symbol("==") => {
+                self.stage = DefinitionStage::ReadingTerms;
+                Ok(ParserStateResult::continued())
+            }
+            (
+                DefinitionStage::ReadingTerms,
+                token @ (Token::Dot | Token::SemiColon | Token::Keyword(Keyword::End)),
+            ) => Ok(ParserStateResult::done()
+                .reject(token)
+                .with_values(self.drain_values())),
+            (DefinitionStage::ReadingTerms, token) => {
+                Ok(ParserStateResult::forward_to(ParserState::Empty).reject(token))
+            }
+            (_, token) => Err(ParserError::UnexpectedToken(token)),
+        }
+    }
+    fn handle_sub_state_done(
+        &mut self,
+        values: Vec<Value>,
+    ) -> Result<Option<Vec<Value>>, ParserError> {
+        match self.stage {
+            DefinitionStage::AwaitingEquals => unreachable!(),
+            DefinitionStage::ReadingTerms => {
+                self.terms.extend(values);
+                Ok(None)
+            }
+        }
+    }
+    fn finish(self) -> Result<Vec<Value>, ParserError> {
+        Err(match self.stage {
+            DefinitionStage::AwaitingEquals => ParserError::UnexpectedEndOfInputExpectedTokens {
+                expected_tokens: vec![
+                    TokenType::Dot,
+                    TokenType::SemiColon,
+                    TokenType::Keyword(Keyword::End),
+                ],
+            },
+            DefinitionStage::ReadingTerms => ParserError::UnexpectedEndOfInput,
+        })
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
@@ -227,18 +394,26 @@ impl ParserState {
     fn handle_token(&mut self, token: Token) -> Result<ParserStateResult, ParserError> {
         match self {
             Self::Empty => match token {
-                Token::Keyword(_) => {
-                    // TODO: resolve all the syntax sugar into pure Joy code
-                    todo!()
+                Token::Keyword(Keyword::Const)
+                | Token::Keyword(Keyword::Define)
+                | Token::Keyword(Keyword::Libra)
+                | Token::Keyword(Keyword::Inline) => {
+                    Ok(ParserStateResult::forward_to(Module::public_unnamed()))
+                }
+                Token::Keyword(Keyword::Hide) => {
+                    Ok(ParserStateResult::forward_to(Module::private_unnamed()))
+                }
+                Token::Keyword(Keyword::Module) => {
+                    Ok(ParserStateResult::forward_to(Module::named()))
                 }
                 Token::Symbol(symbol) => Ok(ParserStateResult::forward_to(
                     Self::SymbolOrQualifiedAccess(SymbolOrQualifiedAccess::new(symbol)),
                 )),
                 Token::Literal(l) => Ok(ParserStateResult::done().with_value(l)),
-                Token::Dot => Ok(ParserStateResult::done().with_value(Symbol::intern("."))),
+                Token::Dot => Ok(ParserStateResult::done().with_value(symbol("."))),
                 Token::SemiColon => {
                     // ; - shouldn't really happen (not present outside of definitions/modules)
-                    Ok(ParserStateResult::done().with_value(Symbol::intern(";")))
+                    Ok(ParserStateResult::done().with_value(symbol(";")))
                 }
                 Token::ListStart => Ok(ParserStateResult::forward_to(Collection::new_list())),
                 Token::SetStart => Ok(ParserStateResult::forward_to(Collection::new_set())),
@@ -285,12 +460,8 @@ impl ParserState {
                     Ok(ParserStateResult::forward_to(Self::Empty).reject(token))
                 }
             }
-            Self::Module(module) => {
-                todo!()
-            }
-            Self::Definition(def) => {
-                todo!()
-            }
+            Self::Module(module) => module.handle_token(token),
+            Self::Definition(def) => def.handle_token(token),
         }
     }
 
@@ -304,16 +475,9 @@ impl ParserState {
             Self::SymbolOrQualifiedAccess(_) => {
                 unreachable!()
             }
-            Self::Collection(col) => {
-                col.items.extend(values);
-                Ok(None)
-            }
-            Self::Module(module) => {
-                todo!()
-            }
-            Self::Definition(def) => {
-                todo!()
-            }
+            Self::Collection(col) => col.handle_sub_state_done(values),
+            Self::Module(module) => module.handle_sub_state_done(values),
+            Self::Definition(def) => def.handle_sub_state_done(values),
         }
     }
 
@@ -322,14 +486,10 @@ impl ParserState {
             Self::Empty => Ok(vec![]),
             Self::SymbolOrQualifiedAccess(mut sym_or_qa) => Ok(sym_or_qa.drain_all()),
             Self::Collection(col) => Err(ParserError::UnexpectedEndOfInputExpectedTokens {
-                expected_tokens: vec![col.expected_end()],
+                expected_tokens: vec![col.expected_end().type_()],
             }),
-            Self::Module(module) => {
-                todo!()
-            }
-            Self::Definition(def) => {
-                todo!()
-            }
+            Self::Module(module) => module.finish(),
+            Self::Definition(def) => def.finish(),
         }
     }
 }
@@ -386,7 +546,7 @@ impl Parser {
                     None
                 };
             }
-            
+
             token_to_process = rejected_token;
         }
         Ok(resulting_values)
@@ -420,6 +580,16 @@ impl Parser {
     }
 }
 
+pub fn parse(tokens: impl IntoIterator<Item = Token>) -> Result<Vec<Value>, ParserError> {
+    let mut results = Vec::new();
+    let mut parser = Parser::default();
+    for token in tokens {
+        results.extend(parser.handle_token(token)?);
+    }
+    results.extend(parser.finish()?);
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::lexer::{Literal, lex};
@@ -428,22 +598,9 @@ mod tests {
 
     macro_rules! p {
         ($tokens:expr, $($expected:expr),*) => {
-            let mut results = Vec::new();
-            let mut parser = Parser::default();
-            for token in $tokens {
-                results.extend(parser.handle_token(token).unwrap());
-            }
-            results.extend(parser.finish().unwrap());
+            let results = parse($tokens).unwrap();
             assert_eq!(results, vec![$($expected),*]);
         };
-    }
-
-    fn token_sym(s: &str) -> Token {
-        Token::Symbol(Symbol::intern(s))
-    }
-
-    fn token_lit(l: impl Into<Literal>) -> Token {
-        Token::Literal(l.into())
     }
 
     fn tokens(s: &str) -> Vec<Token> {
@@ -451,15 +608,19 @@ mod tests {
     }
 
     fn value_sym(s: &str) -> Value {
-        Value::Symbol(Symbol::intern(s))
+        Value::Symbol(symbol(s))
     }
 
     fn value_qualified_access(s: &str) -> Value {
-        Value::QualifiedAccess(s.split('.').map(Symbol::intern).collect())
+        Value::QualifiedAccess(s.split('.').map(symbol).collect())
     }
 
     fn value_lit(l: impl Into<Literal>) -> Value {
         l.into().into()
+    }
+
+    fn module_symbol() -> Value {
+        symbol(MODULE_CREATION_BUILTIN).into()
     }
 
     #[test]
@@ -483,10 +644,7 @@ mod tests {
 
     #[test]
     fn it_parses_simple_list() {
-        p!(
-            tokens("[1 2 3]"),
-            Value::List(vec![value_lit(1), value_lit(2), value_lit(3)])
-        );
+        p!(tokens("[1 2 3]"), Value::list3(1, 2, 3));
     }
 
     #[test]
@@ -499,32 +657,20 @@ mod tests {
 
     #[test]
     fn it_parses_simple_list_with_trailing_dot() {
-        p!(
-            tokens("[1 2 3]."),
-            Value::List(vec![value_lit(1), value_lit(2), value_lit(3)]),
-            value_sym(".")
-        );
+        p!(tokens("[1 2 3]."), Value::list3(1, 2, 3), value_sym("."));
     }
 
     #[test]
     fn it_parses_nested_lists() {
         p!(
             tokens("[1 [2 3] 4]"),
-            Value::List(vec![
-                value_lit(1),
-                Value::List(vec![value_lit(2), value_lit(3)]),
-                value_lit(4)
-            ])
+            Value::list3(1, Value::list2(2, 3), 4,)
         );
         p!(
             tokens("[1 [2 [3]] 4] [] [5 6 7]"),
-            Value::List(vec![
-                value_lit(1),
-                Value::List(vec![value_lit(2), Value::List(vec![value_lit(3)])]),
-                value_lit(4)
-            ]),
-            Value::List(vec![]),
-            Value::List(vec![value_lit(5), value_lit(6), value_lit(7)])
+            Value::list3(1, Value::list2(2, Value::list1(3)), 4,),
+            Value::list0(),
+            Value::list3(5, 6, 7)
         );
     }
 
@@ -532,107 +678,119 @@ mod tests {
     fn it_parses_empty_modules() {
         p!(
             tokens("MODULE foo END"),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("foo")]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list1(symbol("foo")),
+            module_symbol()
         );
         p!(
             tokens("MODULE foo."),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("foo")]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list1(symbol("foo")),
+            module_symbol()
         );
 
         p!(
             tokens("LIBRA END"),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
         p!(
             tokens("LIBRA."),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
 
         p!(
             tokens("DEFINE END"),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
         p!(
             tokens("DEFINE."),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
 
         p!(
             tokens("HIDE IN END"),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
         p!(
             tokens("HIDE IN."),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
 
         p!(
             tokens("CONST END"),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
         p!(
             tokens("CONST."),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
 
         p!(
             tokens("INLINE END"),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
         p!(
             tokens("INLINE."),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            Value::list0(),
+            Value::list0(),
+            module_symbol()
         );
     }
 
     #[test]
     fn it_parses_simple_modules() {
         p!(
-            tokens("MODULE foo PRIVATE whatever == something END"),
+            tokens("DEFINE whatever == something END"),
+            Value::list0(),
             Value::List(vec![
-                Value::List(vec![value_sym("something")]),
-                Value::List(vec![value_sym("whatever")]),
+                Value::list1(symbol("something")),
+                Value::list1(symbol("whatever")),
                 value_sym("==")
             ]),
-            Value::List(vec![]),
-            Value::List(vec![value_sym("foo")]),
-            Value::List(vec![value_sym("MODULE")])
+            Value::list0(),
+            module_symbol()
+        );
+
+        p!(
+            tokens("MODULE foo PRIVATE whatever == something END"),
+            Value::list3(
+                Value::list1(symbol("something")),
+                Value::list1(symbol("whatever")),
+                value_sym("==")
+            ),
+            Value::list0(),
+            Value::list1(symbol("foo")),
+            module_symbol()
         );
     }
 }

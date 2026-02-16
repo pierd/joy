@@ -4,7 +4,20 @@
 use thiserror::Error;
 
 use crate::either::Either;
-use crate::symbol::Symbol;
+use crate::symbol::{Symbol, symbol};
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum TokenType {
+    Keyword(Keyword),
+    Symbol,
+    Literal,
+    Dot,
+    SemiColon,
+    ListStart,
+    ListEnd,
+    SetStart,
+    SetEnd,
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
@@ -33,10 +46,24 @@ impl From<Literal> for Token {
         Token::Literal(l)
     }
 }
+impl Token {
+    pub fn type_(&self) -> TokenType {
+        match self {
+            Self::Keyword(k) => TokenType::Keyword(*k),
+            Self::Symbol(_) => TokenType::Symbol,
+            Self::Literal(_) => TokenType::Literal,
+            Self::Dot => TokenType::Dot,
+            Self::SemiColon => TokenType::SemiColon,
+            Self::ListStart => TokenType::ListStart,
+            Self::ListEnd => TokenType::ListEnd,
+            Self::SetStart => TokenType::SetStart,
+            Self::SetEnd => TokenType::SetEnd,
+        }
+    }
+}
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Keyword {
-    // TODO: add missing keywords (https://wodan58.github.io/j09imp.html#TOC-4)
     Const,
     Define,
     Libra,
@@ -48,20 +75,22 @@ pub enum Keyword {
     Public,
     Inline,
 }
-impl Keyword {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for Keyword {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "CONST" => Some(Keyword::Const),
-            "DEFINE" => Some(Keyword::Define),
-            "LIBRA" => Some(Keyword::Libra),
-            "HIDE" => Some(Keyword::Hide),
-            "IN" => Some(Keyword::In),
-            "END" => Some(Keyword::End),
-            "MODULE" => Some(Keyword::Module),
-            "PRIVATE" => Some(Keyword::Private),
-            "PUBLIC" => Some(Keyword::Public),
-            "INLINE" => Some(Keyword::Inline),
-            _ => None,
+            "CONST" => Ok(Keyword::Const),
+            "DEFINE" => Ok(Keyword::Define),
+            "LIBRA" => Ok(Keyword::Libra),
+            "HIDE" => Ok(Keyword::Hide),
+            "IN" => Ok(Keyword::In),
+            "END" => Ok(Keyword::End),
+            "MODULE" => Ok(Keyword::Module),
+            "PRIVATE" => Ok(Keyword::Private),
+            "PUBLIC" => Ok(Keyword::Public),
+            "INLINE" => Ok(Keyword::Inline),
+            _ => Err(()),
         }
     }
 }
@@ -318,10 +347,7 @@ impl LexerState {
             Self::FoundOpenParen => Ok(if c == '*' {
                 (Self::InBlockComment, [None, None])
             } else if c.is_whitespace() {
-                (
-                    Self::Empty,
-                    [Some(Token::Symbol(Symbol::intern("("))), None],
-                )
+                (Self::Empty, [Some(Token::Symbol(symbol("("))), None])
             } else if let Some(token) = parse_restricted_char_token(c) {
                 (Self::Empty, [Some(token), None])
             } else {
@@ -362,10 +388,10 @@ impl LexerState {
                             Self::Empty
                         },
                         [
-                            Some(if let Some(keyword) = Keyword::from_str(&s) {
+                            Some(if let Ok(keyword) = s.parse() {
                                 Token::Keyword(keyword)
                             } else {
-                                Token::Symbol(Symbol::intern(&s))
+                                Token::Symbol(symbol(&s))
                             }),
                             parse_restricted_char_token(c),
                         ],
@@ -549,7 +575,7 @@ impl LexerState {
         match self {
             Self::Empty => Ok([None, None]),
             Self::InLineComment => Ok([None, None]),
-            Self::FoundOpenParen => Ok([Some(Token::Symbol(Symbol::intern("("))), None]),
+            Self::FoundOpenParen => Ok([Some(Token::Symbol(symbol("("))), None]),
             Self::InBlockComment => Err(LexerError::Unknown("InBlockComment".to_string())),
             Self::FoundCloseStarMaybe => {
                 Err(LexerError::Unknown("FoundCloseStarMaybe".to_string()))
@@ -590,10 +616,10 @@ impl LexerState {
     }
 
     fn finish_symbol_or_keyword(s: String) -> Result<[Option<Token>; 2], LexerError> {
-        Ok(if let Some(keyword) = Keyword::from_str(&s) {
+        Ok(if let Ok(keyword) = s.parse() {
             [Some(Token::Keyword(keyword)), None]
         } else {
-            [Some(Token::Symbol(Symbol::intern(&s))), None]
+            [Some(Token::Symbol(symbol(&s))), None]
         })
     }
 }
@@ -604,14 +630,14 @@ pub fn lex(input: impl AsRef<str>) -> Result<Vec<Token>, LexerError> {
     for c in input.as_ref().chars() {
         let (new_state, new_tokens) = state.handle_char(c)?;
         state = new_state;
-        tokens.extend(new_tokens.into_iter().filter_map(|token| token));
+        tokens.extend(new_tokens.into_iter().flatten());
     }
     let new_tokens = state.finish()?;
-    tokens.extend(new_tokens.into_iter().filter_map(|token| token));
+    tokens.extend(new_tokens.into_iter().flatten());
     Ok(tokens)
 }
 
-struct LexerIterator<I: Iterator<Item = char>> {
+pub struct LexerIterator<I: Iterator<Item = char>> {
     iter: I,
     state: Option<LexerState>,
     pending_token: Option<Token>,
@@ -663,16 +689,18 @@ impl<I: Iterator<Item = char>> LexableIterator for I {}
 
 #[cfg(test)]
 mod tests {
+    use crate::symbol::symbol;
+
     use super::*;
 
     macro_rules! l {
         ($s:expr, $($expected:expr),*) => {
-            assert_eq!(lex($s), Ok(vec![$($expected),*]));
+            assert_eq!(lex($s), Ok(vec![$($expected),*]))
         };
     }
 
     fn sym(s: &str) -> Token {
-        Token::Symbol(Symbol::intern(s))
+        Token::Symbol(symbol(s))
     }
 
     fn lit(l: impl Into<Literal>) -> Token {
@@ -775,7 +803,7 @@ mod tests {
         l!("{", Token::SetStart);
         l!("}", Token::SetEnd);
 
-        l!(".(", Token::Dot, Symbol::intern("(").into());
+        l!(".(", Token::Dot, symbol("(").into());
         l!(
             ".;[]{}",
             Token::Dot,

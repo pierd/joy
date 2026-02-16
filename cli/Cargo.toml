@@ -1,0 +1,12 @@
+[package]
+name = "joy_cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "joy"
+path = "src/main.rs"
+
+[dependencies]
+clap = "4.5.58"
+joy_engine = { path = "../engine" }

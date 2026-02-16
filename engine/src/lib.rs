@@ -1,6 +1,8 @@
+mod builtins;
 mod either;
-mod interpreter;
-mod lexer;
-mod parser;
-mod symbol;
-mod value;
+pub mod lexer;
+pub mod parser;
+pub mod scope;
+pub mod symbol;
+pub mod value;
+pub mod vm;
