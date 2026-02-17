@@ -1,10 +1,6 @@
-use std::rc::Rc;
+use std::fmt::Write;
 
-use crate::{
-    lexer::Literal,
-    symbol::Symbol,
-    vm::{VM, VMError},
-};
+use crate::{lexer::Literal, symbol::Symbol, vm::VMError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
@@ -17,8 +13,6 @@ pub enum ValueType {
     QualifiedAccess,
     List,
     Set,
-    Code,
-    Builtin,
 }
 impl std::fmt::Display for ValueType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -32,15 +26,11 @@ impl std::fmt::Display for ValueType {
             Self::QualifiedAccess => write!(f, "qualified access"),
             Self::List => write!(f, "list"),
             Self::Set => write!(f, "set"),
-            Self::Code => write!(f, "code"),
-            Self::Builtin => write!(f, "builtin"),
         }
     }
 }
 
-pub type BuiltinFn = Rc<dyn Fn(&mut VM) -> Result<(), VMError>>;
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Boolean(bool),
     Char(char),
@@ -52,26 +42,49 @@ pub enum Value {
     List(Vec<Value>),
     // FIXME: something better for the set? specialize it maybe?
     Set(Vec<Value>),
-    // note: code can only be created by "=="
-    Code(Vec<Value>),
-    // TODO: remove from here, it only exists in the scope (never on the stack)
-    Builtin(BuiltinFn),
 }
 
-impl std::fmt::Debug for Value {
+impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Boolean(b) => f.write_fmt(format_args!("{:?}", b)),
-            Self::Char(c) => f.write_fmt(format_args!("{:?}", c)),
-            Self::String(s) => f.write_fmt(format_args!("{:?}", s)),
-            Self::Float(fl) => f.write_fmt(format_args!("{:?}", fl)),
-            Self::Integer(i) => f.write_fmt(format_args!("{:?}", i)),
-            Self::Symbol(s) => f.write_fmt(format_args!("{:?}", s)),
-            Self::QualifiedAccess(qa) => f.write_fmt(format_args!("{:?}", qa)),
-            Self::List(l) => f.write_fmt(format_args!("List {:?}", l)),
-            Self::Set(s) => f.write_fmt(format_args!("Set {:?}", s)),
-            Self::Code(c) => f.write_fmt(format_args!("Code {:?}", c)),
-            Self::Builtin(_) => f.write_str("Builtin"),
+            Value::Boolean(b) => b.fmt(f),
+            Value::Char(c) => f.write_char(*c),
+            Value::String(s) => f.write_str(s),
+            Value::Float(fl) => f.write_fmt(format_args!("{}", *fl)),
+            Value::Integer(i) => i.fmt(f),
+            Value::Symbol(symbol) => symbol.fmt(f),
+            Value::QualifiedAccess(symbols) => {
+                if let Some(first) = symbols.first() {
+                    first.fmt(f)?
+                }
+                for x in symbols.iter().skip(1) {
+                    f.write_char('.')?;
+                    x.fmt(f)?;
+                }
+                Ok(())
+            }
+            Value::List(values) => {
+                f.write_char('[')?;
+                if let Some(first) = values.first() {
+                    first.fmt(f)?
+                }
+                for x in values.iter().skip(1) {
+                    f.write_char(' ')?;
+                    x.fmt(f)?;
+                }
+                f.write_char(']')
+            }
+            Value::Set(values) => {
+                f.write_char('{')?;
+                if let Some(first) = values.first() {
+                    first.fmt(f)?
+                }
+                for x in values.iter().skip(1) {
+                    f.write_char(' ')?;
+                    x.fmt(f)?;
+                }
+                f.write_char('}')
+            }
         }
     }
 }
@@ -88,7 +101,6 @@ impl std::cmp::PartialEq for Value {
             (Self::QualifiedAccess(qa1), Self::QualifiedAccess(qa2)) => qa1 == qa2,
             (Self::List(l1), Self::List(l2)) => l1 == l2,
             (Self::Set(s1), Self::Set(s2)) => s1 == s2,
-            (Self::Code(c1), Self::Code(c2)) => c1 == c2,
             _ => false,
         }
     }
@@ -122,12 +134,19 @@ simple_from!(isize, v, Value::Integer(v));
 simple_from!(i8, v, Value::Integer(v as isize));
 simple_from!(i16, v, Value::Integer(v as isize));
 simple_from!(i32, v, Value::Integer(v as isize));
-simple_from!(usize, v, Value::Integer(v.try_into().unwrap())); // FIXME
 simple_from!(u8, v, Value::Integer(v as isize));
 simple_from!(u16, v, Value::Integer(v as isize));
 simple_from!(u32, v, Value::Integer(v as isize));
 simple_from!(Symbol, v, Value::Symbol(v));
-simple_from!(BuiltinFn, v, Value::Builtin(v));
+simple_from!(Vec<Value>, v, Value::List(v));
+
+impl TryFrom<usize> for Value {
+    type Error = VMError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Ok(Self::Integer(value.try_into()?))
+    }
+}
 
 impl Value {
     pub fn type_(&self) -> ValueType {
@@ -141,8 +160,6 @@ impl Value {
             Self::QualifiedAccess(_) => ValueType::QualifiedAccess,
             Self::List(_) => ValueType::List,
             Self::Set(_) => ValueType::Set,
-            Self::Code(_) => ValueType::Code,
-            Self::Builtin(_) => ValueType::Builtin,
         }
     }
 

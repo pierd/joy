@@ -31,10 +31,11 @@
 /// and modules stop being magical constructs and become regular Joy source code.
 use thiserror::Error;
 
-use crate::builtins::MODULE_CREATION_BUILTIN;
 use crate::lexer::{Keyword, Token, TokenType};
 use crate::symbol::{Symbol, symbol};
 use crate::value::Value;
+
+pub(crate) const MODULE_CREATION_BUILTIN: &str = "MODULE";
 
 #[derive(Debug, Error, PartialEq, Clone)]
 pub enum ParserError {

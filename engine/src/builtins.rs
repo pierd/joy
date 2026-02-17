@@ -1,125 +1,101 @@
 use crate::{
-    symbol::Symbol,
     value::{NumValue, Value},
-    vm::{VM, ValueExt},
+    vm::VM,
 };
 
-pub(crate) const MODULE_CREATION_BUILTIN: &str = "MODULE";
+#[macro_export]
+macro_rules! impl_builtin_fn {
+    ( $name:expr => ( $vm:ident $(, $arg:ident : $typ:ty )* ) $body:block ) => {
+        |$vm: &mut $crate::vm::VM| -> Result<(), $crate::vm::VMError> {
+            $(
+                let $arg: $typ = $vm.pop()?.try_into()?;
+            )*
+            $body
+            Ok(())
+        }
+    };
+}
 
-macro_rules! fun {
-    ($vm:ident, $f:expr) => {
-        $crate::value::Value::Builtin(std::rc::Rc::new(
-            move |$vm: &mut crate::vm::VM| -> Result<(), $crate::vm::VMError> { $f },
-        ))
+#[macro_export]
+macro_rules! impl_builtins {
+    ( $outer_vm:ident, { $( $name:ident ( $vm:ident $(, $arg:ident : $typ:ty )* ) $body:block )* } ) => {
+        $(
+            $outer_vm.set_value(
+                stringify!($name),
+                $crate::vm::BuiltinFn::new(
+                    $crate::impl_builtin_fn!(stringify!($name) => ($vm $(,$arg:$typ)*) $body)
+                )
+            );
+        )*
+    };
+}
+
+macro_rules! impl_builtins_str {
+    ( $outer_vm:ident, { $( $name:expr => ( $vm:ident $(, $arg:ident : $typ:ty )* ) $body:block )* } ) => {
+        $(
+            $outer_vm.set_value(
+                $name,
+                $crate::vm::BuiltinFn::new(
+                    impl_builtin_fn!($name => ($vm $(,$arg:$typ)*) $body)
+                )
+            );
+        )*
     };
 }
 
 fn add_bools(vm: &VM) {
-    vm.set_value("false", false);
-    vm.set_value("true", true);
+    vm.set_value("false", Value::from(false));
+    vm.set_value("true", Value::from(true));
 }
 
 fn add_stack(vm: &VM) {
-    vm.set_value(
-        "pop",
-        fun!(vm, {
+    impl_builtins!(vm, {
+        pop(vm) {
             vm.pop()?;
-            Ok(())
-        }),
-    );
-    vm.set_value(
-        "dup",
-        fun!(vm, {
-            let v = vm.pop()?;
-            vm.push(v.clone());
-            vm.push(v);
-            Ok(())
-        }),
-    );
-    vm.set_value(
-        "swap",
-        fun!(vm, {
-            let a = vm.pop()?;
-            let b = vm.pop()?;
+        }
+
+        dup(vm, x: Value) {
+            vm.push(x.clone());
+            vm.push(x);
+        }
+
+        swap(vm, a: Value, b: Value) {
             vm.push(a);
             vm.push(b);
-            Ok(())
-        }),
-    );
-}
-
-fn add_modules(vm: &VM) {
-    vm.set_value(
-        "==",
-        fun!(vm, {
-            let name: Symbol = vm.pop()?.into_quoted_value()?.try_into()?;
-            let commands = vm.pop()?.into_list()?;
-            vm.set_value(name, Value::Code(commands));
-            Ok(())
-        }),
-    );
-    vm.set_value(
-        MODULE_CREATION_BUILTIN,
-        fun!(vm, {
-            let name = vm
-                .pop()?
-                .into_optional_quoted_value()?
-                .map(|v| v.try_into())
-                .transpose()?;
-            let public = vm.pop()?.into_list()?;
-            let private = vm.pop()?.into_list()?;
-            // FIXME: rethink this scoping
-            vm.push_scopes();
-            vm.eval_commands(private)?;
-            vm.seal_scopes()?;
-            vm.eval_commands(public)?;
-            vm.pop_scopes(name)?;
-            Ok(())
-        }),
-    );
+        }
+    });
 }
 
 fn add_math(vm: &VM) {
-    vm.set_value(
-        "pred",
-        fun!(vm, {
-            let n: NumValue = vm.pop()?.try_into()?;
+    impl_builtins!(vm, {
+        pred(vm, n: NumValue) {
             vm.push(n.map(|n| n - 1, |n| n - 1.0));
-            Ok(())
-        }),
-    );
-    vm.set_value(
-        "succ",
-        fun!(vm, {
-            let n: NumValue = vm.pop()?.try_into()?;
+        }
+
+        succ(vm, n: NumValue) {
             vm.push(n.map(|n| n + 1, |n| n + 1.0));
-            Ok(())
-        }),
-    );
-    vm.set_value(
-        "+",
-        fun!(vm, {
-            let a = vm.pop()?.try_into()?;
-            let b = vm.pop()?.try_into()?;
-            vm.push(NumValue::operation(a, b, |a, b| a + b, |a, b| a + b));
-            Ok(())
-        }),
-    );
-    vm.set_value(
-        "*",
-        fun!(vm, {
-            let a = vm.pop()?.try_into()?;
-            let b = vm.pop()?.try_into()?;
-            vm.push(NumValue::operation(a, b, |a, b| a * b, |a, b| a * b));
-            Ok(())
-        }),
-    );
+        }
+    });
+
+    impl_builtins_str!(vm, {
+        "+" => (vm, x: NumValue, y: NumValue) {
+            vm.push(NumValue::operation(x, y, |a, b| a + b, |a, b| a + b));
+        }
+        "-" => (vm, x: NumValue, y: NumValue) {
+            vm.push(NumValue::operation(y, x, |a, b| a - b, |a, b| a - b));
+        }
+        "*" => (vm, x: NumValue, y: NumValue) {
+            vm.push(NumValue::operation(x, y, |a, b| a * b, |a, b| a * b));
+        }
+        "/" => (vm, x: NumValue, y: NumValue) {
+            vm.push(NumValue::operation(y, x, |a, b| a / b, |a, b| a / b));
+        }
+    });
 }
 
 pub fn add_builtins(vm: VM) -> VM {
     add_bools(&vm);
     add_stack(&vm);
-    add_modules(&vm);
     add_math(&vm);
     vm
 }

@@ -1,29 +1,22 @@
 use std::io::Read;
-use std::rc::Rc;
 
+use joy_engine::impl_builtins;
 use joy_engine::lexer::lex;
 use joy_engine::parser::parse;
-use joy_engine::value::{BuiltinFn, Value};
+use joy_engine::value::Value;
 use joy_engine::vm::VM;
 
 fn create_vm() -> VM {
     let vm = VM::default();
-    vm.set_value(
-        "argc",
-        Rc::new(move |vm: &mut VM| {
-            vm.push(std::env::args().len());
-            Ok(())
-        }) as BuiltinFn,
-    );
-    vm.set_value(
-        "argv",
-        Rc::new(move |vm: &mut VM| {
-            vm.push(Value::List(
-                std::env::args().map(Into::into).collect::<Vec<_>>(),
-            ));
-            Ok(())
-        }) as BuiltinFn,
-    );
+    impl_builtins!(vm, {
+        argc(vm) {
+            vm.try_push(std::env::args().len())?;
+        }
+
+        argv(vm) {
+            vm.push(std::env::args().map(Into::into).collect::<Vec<_>>());
+        }
+    });
     vm
 }
 
@@ -37,5 +30,5 @@ fn main() {
     for cmd in program {
         vm.eval(cmd).unwrap();
     }
-    println!("Stack: {:?}", vm.drain_stack());
+    println!("Stack: {}", Value::List(vm.drain_stack()));
 }
