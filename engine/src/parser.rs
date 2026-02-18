@@ -121,6 +121,41 @@ impl SymbolOrQualifiedAccess {
         }
         values
     }
+
+    fn handle_token(&mut self, token: Token) -> Result<ParserStateResult, ParserError> {
+        match token {
+            Token::Symbol(symbol) => {
+                if self.trailing_dot {
+                    // symbols "." symbol -> another qualified access component
+                    self.push(symbol);
+                    Ok(Default::default())
+                } else {
+                    // no trailing dot but we got a new symbol - > consume qualified access state
+                    Ok(ParserStateResult::done()
+                        .reject(symbol)
+                        .with_values(self.drain_all()))
+                }
+            }
+            Token::Dot => {
+                if self.trailing_dot {
+                    // symbols "." "." -> consume qualified access state
+                    Ok(ParserStateResult::done()
+                        .with_values(self.drain_all())
+                        .reject(token))
+                } else {
+                    // symbols "." -> just add the dot
+                    self.trailing_dot = true;
+                    Ok(ParserStateResult::continued())
+                }
+            }
+            _ => {
+                // symbols "."? anything -> drain qualified access state, emit dot if needed, reject token
+                Ok(ParserStateResult::done()
+                    .with_values(self.drain_all())
+                    .reject(token))
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -420,7 +455,7 @@ impl ParserState {
                     Ok(ParserStateResult::forward_to(Module::named()))
                 }
                 Token::Symbol(symbol) => Ok(ParserStateResult::forward_to(
-                    Self::SymbolOrQualifiedAccess(SymbolOrQualifiedAccess::new(symbol)),
+                    SymbolOrQualifiedAccess::new(symbol),
                 )),
                 Token::Literal(l) => Ok(ParserStateResult::done().with_value(l)),
                 Token::Dot => Ok(ParserStateResult::done().with_value(symbol("."))),
@@ -432,40 +467,7 @@ impl ParserState {
                 Token::SetStart => Ok(ParserStateResult::forward_to(Collection::new_set())),
                 _ => Err(ParserError::UnexpectedToken(token)),
             },
-            Self::SymbolOrQualifiedAccess(sym_or_qa) => {
-                match token {
-                    Token::Symbol(symbol) => {
-                        if sym_or_qa.trailing_dot {
-                            // symbols "." symbol -> another qualified access component
-                            sym_or_qa.push(symbol);
-                            Ok(Default::default())
-                        } else {
-                            // no trailing dot but we got a new symbol - > consume qualified access state
-                            Ok(ParserStateResult::done()
-                                .reject(symbol)
-                                .with_values(sym_or_qa.drain_all()))
-                        }
-                    }
-                    Token::Dot => {
-                        if sym_or_qa.trailing_dot {
-                            // symbols "." "." -> consume qualified access state
-                            Ok(ParserStateResult::done()
-                                .with_values(sym_or_qa.drain_all())
-                                .reject(token))
-                        } else {
-                            // symbols "." -> just add the dot
-                            sym_or_qa.trailing_dot = true;
-                            Ok(ParserStateResult::continued())
-                        }
-                    }
-                    _ => {
-                        // symbols "."? anything -> drain qualified access state, emit dot if needed, reject token
-                        Ok(ParserStateResult::done()
-                            .with_values(sym_or_qa.drain_all())
-                            .reject(token))
-                    }
-                }
-            }
+            Self::SymbolOrQualifiedAccess(sym_or_qa) => sym_or_qa.handle_token(token),
             Self::Collection(col) => {
                 if token == col.expected_end() {
                     Ok(ParserStateResult::done().with_value(col.drain()))
@@ -637,17 +639,17 @@ mod tests {
     }
 
     #[test]
-    fn it_parses_simple_symbol() {
+    fn parses_simple_symbol() {
         p!(tokens("foo"), value_sym("foo"));
     }
 
     #[test]
-    fn it_parses_simple_qualified_access() {
+    fn parses_simple_qualified_access() {
         p!(tokens("foo.bar"), value_qualified_access("foo.bar"));
     }
 
     #[test]
-    fn it_parses_simple_qualified_access_with_trailing_dot() {
+    fn parses_simple_qualified_access_with_trailing_dot() {
         p!(
             tokens("foo.bar."),
             value_qualified_access("foo.bar"),
@@ -656,12 +658,12 @@ mod tests {
     }
 
     #[test]
-    fn it_parses_simple_list() {
+    fn parses_simple_list() {
         p!(tokens("[1 2 3]"), Value::list3(1, 2, 3));
     }
 
     #[test]
-    fn it_parses_simple_set() {
+    fn parses_simple_set() {
         p!(
             tokens("{1 2 3}"),
             Value::Set(vec![value_lit(1), value_lit(2), value_lit(3)])
@@ -669,12 +671,12 @@ mod tests {
     }
 
     #[test]
-    fn it_parses_simple_list_with_trailing_dot() {
+    fn parses_simple_list_with_trailing_dot() {
         p!(tokens("[1 2 3]."), Value::list3(1, 2, 3), value_sym("."));
     }
 
     #[test]
-    fn it_parses_nested_lists() {
+    fn parses_nested_lists() {
         p!(
             tokens("[1 [2 3] 4]"),
             Value::list3(1, Value::list2(2, 3), 4,)
@@ -688,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn it_parses_empty_modules() {
+    fn parses_empty_modules() {
         p!(
             tokens("MODULE foo END"),
             Value::list0(),
@@ -781,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn it_parses_simple_modules() {
+    fn parses_simple_modules() {
         p!(
             tokens("DEFINE whatever == something END"),
             Value::list0(),
@@ -808,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn it_parses_nested_modules() {
+    fn parses_nested_modules() {
         p!(
             tokens(
                 r#"
