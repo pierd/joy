@@ -1,11 +1,12 @@
 use std::rc::Rc;
 
 use crate::{
-    builtins::add_builtins,
+    builtins::VMBuiltinsExt,
+    impl_builtins_str,
     parser::MODULE_CREATION_BUILTIN,
     scope::{NamedValue, Namespace, Scope},
     symbol::Symbol,
-    value::{Value, ValueType},
+    value::{List, Quoted, QuotedOptional, Value, ValueType},
 };
 use thiserror::Error;
 
@@ -70,66 +71,63 @@ pub struct VM {
 }
 impl std::default::Default for VM {
     fn default() -> Self {
+        let vm = VM::minimal();
+        vm.init_all();
+        vm
+    }
+}
+impl VM {
+    pub fn minimal() -> Self {
         let vm = Self {
             stack: Default::default(),
             scopes: vec![Default::default()],
         };
+        vm.init_module_builtins();
+        vm
+    }
 
-        vm.set_value(".", BuiltinFn::new(|_: &mut VM| {
-            // FIXME
-            // no-op
-            Ok(())
-        }));
+    pub fn init_module_builtins(&self) {
+        impl_builtins_str!(self, {
+            "." => (_vm) {
+                // no-op - to be overridden by VM integrations
+            }
 
-        vm.set_value(
-            "==",
-            BuiltinFn::new(|vm: &mut VM| {
-                let name: Symbol = vm.pop()?.into_quoted_value()?.try_into()?;
-                let commands = vm.pop()?.into_list()?;
+            "==" => (vm, name: Quoted<Symbol>, commands: List<Value>) {
                 let capture = vm.current_scope();
-                vm.set_value(name, NamedValue::Code(Code { commands, capture }));
-                Ok(())
-            }),
-        );
+                vm.set_value(
+                    name.into_inner(),
+                    NamedValue::Code(Code {
+                        commands: commands.into_inner(),
+                        capture,
+                    }),
+                );
+            }
 
-        vm.set_value(
-            MODULE_CREATION_BUILTIN,
-            BuiltinFn::new(|vm: &mut VM| {
-                let name: Option<Symbol> = vm
-                    .pop()?
-                    .into_optional_quoted_value()?
-                    .map(|v| v.try_into())
-                    .transpose()?;
-                let public = vm.pop()?.into_list()?;
-                let private = vm.pop()?.into_list()?;
-
+            MODULE_CREATION_BUILTIN => (vm, name: QuotedOptional<Symbol>, public: List<Value>, private: List<Value>) {
                 // push private scope
                 vm.push_sub_scope();
-                vm.eval_commands(private)?;
+                vm.eval_commands(private.into_inner())?;
                 // push public scope
                 vm.push_sub_scope();
-                vm.eval_commands(public)?;
+                vm.eval_commands(public.into_inner())?;
                 // clean up extra scoping
                 let public_scope = vm.pop_scope()?;
                 vm.pop_scope()?;
                 // expose public namespace
-                if let Some(name) = name {
+                if let Some(name) = name.into_inner() {
                     // attach namespace at its name
                     // FIXME: check for overwrites?
                     vm.set_value(name, public_scope.get_namespace());
                 } else {
                     // incorporate namespace into the current scope
                     // FIXME: check for overwrites?
-                    vm.current_scope().extend_namespace(public_scope.get_namespace());
+                    vm.current_scope()
+                        .extend_namespace(public_scope.get_namespace());
                 }
-                Ok(())
-            }),
-        );
-
-        add_builtins(vm)
+            }
+        });
     }
-}
-impl VM {
+
     ///
     /// eval functions
     ///
@@ -305,13 +303,7 @@ impl ValueExt for Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        errors::Error,
-        lexer::lex,
-        parser::parse,
-        symbol::symbol,
-        value::Value,
-    };
+    use crate::{errors::Error, lexer::lex, parser::parse, symbol::symbol, value::Value};
 
     use super::*;
 
@@ -355,7 +347,8 @@ mod tests {
                 END.
 
                 2 square.
-            "#).unwrap(),
+            "#)
+            .unwrap(),
             vec![4.into()]
         )
     }
@@ -370,7 +363,8 @@ mod tests {
                 END.
 
                 2 test.square.
-            "#).unwrap(),
+            "#)
+            .unwrap(),
             vec![4.into()]
         )
     }
@@ -391,7 +385,8 @@ mod tests {
 
                 5 math.ops.double
                 2 math.square
-            "#).unwrap(),
+            "#)
+            .unwrap(),
             vec![10.into(), 4.into()]
         )
     }

@@ -190,6 +190,91 @@ impl TryFrom<Value> for Symbol {
     }
 }
 
+pub struct List<T>(pub Vec<T>);
+impl<T> TryFrom<Value> for List<T>
+where
+    T: TryFrom<Value>,
+    VMError: From<<T as TryFrom<Value>>::Error>,
+{
+    type Error = VMError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::List(items) => Ok(Self(
+                items
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<T>, _>>()?,
+            )),
+            v => Err(VMError::TypeErrorExpectedQuotedValue {
+                found: v.type_(),
+                expected: ValueType::List,
+            }),
+        }
+    }
+}
+impl<T> List<T> {
+    pub fn into_inner(self) -> Vec<T> {
+        self.0
+    }
+}
+
+pub struct Quoted<T>(pub T);
+impl<T> TryFrom<Value> for Quoted<T>
+where
+    T: TryFrom<Value>,
+    VMError: From<<T as TryFrom<Value>>::Error>,
+{
+    type Error = VMError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::List(mut items) if items.len() == 1 => Ok(Self(
+                items
+                    .pop()
+                    .expect("list should have exactly 1 element")
+                    .try_into()?,
+            )),
+            v => Err(VMError::TypeErrorExpectedQuotedValue {
+                found: v.type_(),
+                expected: ValueType::List,
+            }),
+        }
+    }
+}
+impl<T> Quoted<T> {
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+pub struct QuotedOptional<T>(pub Option<T>);
+impl<T> TryFrom<Value> for QuotedOptional<T>
+where
+    T: TryFrom<Value>,
+    VMError: From<<T as TryFrom<Value>>::Error>,
+{
+    type Error = VMError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::List(items) if items.is_empty() => Ok(Self(None)),
+            Value::List(mut items) if items.len() == 1 => Ok(Self(Some(
+                items
+                    .pop()
+                    .expect("list should have exactly 1 element")
+                    .try_into()?,
+            ))),
+            v => Err(VMError::TypeErrorExpectedQuotedValue {
+                found: v.type_(),
+                expected: ValueType::List,
+            }),
+        }
+    }
+}
+impl<T> QuotedOptional<T> {
+    pub fn into_inner(self) -> Option<T> {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum NumValue {
     Integer(isize),
@@ -227,23 +312,26 @@ impl NumValue {
             Self::Float(n) => Self::Float(float_fn(n)),
         }
     }
+}
 
-    pub fn operation<IntFn: Fn(isize, isize) -> isize, FloatFn: Fn(f64, f64) -> f64>(
-        a: NumValue,
-        b: NumValue,
+pub trait NumValueTupleExt {
+    fn map<IntFn: Fn(isize, isize) -> isize, FloatFn: Fn(f64, f64) -> f64>(
+        self,
+        int_fn: IntFn,
+        float_fn: FloatFn,
+    ) -> NumValue;
+}
+impl NumValueTupleExt for (NumValue, NumValue) {
+    fn map<IntFn: Fn(isize, isize) -> isize, FloatFn: Fn(f64, f64) -> f64>(
+        self,
         int_fn: IntFn,
         float_fn: FloatFn,
     ) -> NumValue {
-        match (a, b) {
-            (Self::Integer(a), Self::Integer(b)) => Self::Integer(int_fn(a, b)),
-            (Self::Integer(a), Self::Float(b)) => Self::Float(float_fn(a as f64, b)),
-            (Self::Float(a), Self::Integer(b)) => Self::Float(float_fn(a, b as f64)),
-            (Self::Float(a), Self::Float(b)) => Self::Float(float_fn(a, b)),
+        match (self.0, self.1) {
+            (NumValue::Integer(a), NumValue::Integer(b)) => NumValue::Integer(int_fn(a, b)),
+            (NumValue::Integer(a), NumValue::Float(b)) => NumValue::Float(float_fn(a as f64, b)),
+            (NumValue::Float(a), NumValue::Integer(b)) => NumValue::Float(float_fn(a, b as f64)),
+            (NumValue::Float(a), NumValue::Float(b)) => NumValue::Float(float_fn(a, b)),
         }
     }
-}
-
-pub enum CollectionValue {
-    List(Vec<Value>),
-    Set(Vec<Value>),
 }

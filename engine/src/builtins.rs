@@ -1,5 +1,5 @@
 use crate::{
-    value::{NumValue, Value},
+    value::{NumValue, NumValueTupleExt, Value},
     vm::VM,
 };
 
@@ -30,74 +30,82 @@ macro_rules! impl_builtins {
     };
 }
 
+#[macro_export]
 macro_rules! impl_builtins_str {
     ( $outer_vm:ident, { $( $name:expr => ( $vm:ident $(, $arg:ident : $typ:ty )* ) $body:block )* } ) => {
         $(
             $outer_vm.set_value(
                 $name,
                 $crate::vm::BuiltinFn::new(
-                    impl_builtin_fn!($name => ($vm $(,$arg:$typ)*) $body)
+                    $crate::impl_builtin_fn!($name => ($vm $(,$arg:$typ)*) $body)
                 )
             );
         )*
     };
 }
 
-fn add_bools(vm: &VM) {
-    vm.set_value("false", Value::from(false));
-    vm.set_value("true", Value::from(true));
+pub trait VMBuiltinsExt {
+    fn init_all(&self);
+    fn init_bools(&self);
+    fn init_stack(&self);
+    fn init_math(&self);
 }
+impl VMBuiltinsExt for VM {
+    fn init_all(&self) {
+        self.init_bools();
+        self.init_stack();
+        self.init_math();
+    }
 
-fn add_stack(vm: &VM) {
-    impl_builtins!(vm, {
-        pop(vm) {
-            vm.pop()?;
-        }
+    fn init_bools(&self) {
+        self.set_value("false", Value::from(false));
+        self.set_value("true", Value::from(true));
+    }
 
-        dup(vm, x: Value) {
-            vm.push(x.clone());
-            vm.push(x);
-        }
+    fn init_stack(&self) {
+        impl_builtins!(self, {
+            pop(vm) {
+                vm.pop()?;
+            }
 
-        swap(vm, a: Value, b: Value) {
-            vm.push(a);
-            vm.push(b);
-        }
-    });
-}
+            dup(vm, x: Value) {
+                vm.push(x.clone());
+                vm.push(x);
+            }
 
-fn add_math(vm: &VM) {
-    impl_builtins!(vm, {
-        pred(vm, n: NumValue) {
-            vm.push(n.map(|n| n - 1, |n| n - 1.0));
-        }
+            swap(vm, a: Value, b: Value) {
+                vm.push(a);
+                vm.push(b);
+            }
+        });
+    }
 
-        succ(vm, n: NumValue) {
-            vm.push(n.map(|n| n + 1, |n| n + 1.0));
-        }
-    });
+    fn init_math(&self) {
+        impl_builtins!(self, {
+            pred(vm, n: NumValue) {
+                vm.push(n.map(|n| n - 1, |n| n - 1.0));
+            }
 
-    impl_builtins_str!(vm, {
-        "+" => (vm, x: NumValue, y: NumValue) {
-            vm.push(NumValue::operation(x, y, |a, b| a + b, |a, b| a + b));
-        }
-        "-" => (vm, x: NumValue, y: NumValue) {
-            vm.push(NumValue::operation(y, x, |a, b| a - b, |a, b| a - b));
-        }
-        "*" => (vm, x: NumValue, y: NumValue) {
-            vm.push(NumValue::operation(x, y, |a, b| a * b, |a, b| a * b));
-        }
-        "/" => (vm, x: NumValue, y: NumValue) {
-            vm.push(NumValue::operation(y, x, |a, b| a / b, |a, b| a / b));
-        }
-    });
-}
+            succ(vm, n: NumValue) {
+                vm.push(n.map(|n| n + 1, |n| n + 1.0));
+            }
+        });
 
-pub fn add_builtins(vm: VM) -> VM {
-    add_bools(&vm);
-    add_stack(&vm);
-    add_math(&vm);
-    vm
+        impl_builtins_str!(self, {
+            "+" => (vm, x: NumValue, y: NumValue) {
+                vm.push((x, y).map(|a, b| a + b, |a, b| a + b));
+            }
+            "-" => (vm, x: NumValue, y: NumValue) {
+                vm.push((y, x).map(|a, b| a - b, |a, b| a - b));
+            }
+            "*" => (vm, x: NumValue, y: NumValue) {
+                vm.push((x, y).map(|a, b| a * b, |a, b| a * b));
+            }
+            "/" => (vm, x: NumValue, y: NumValue) {
+                vm.push((y, x).map(|a, b| a / b, |a, b| a / b));
+            }
+        });
+    }
 }
 
 #[cfg(test)]

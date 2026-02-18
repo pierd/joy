@@ -31,7 +31,7 @@ impl_From_for_NamedValue!(Code, v, NamedValue::Code(v));
 pub struct Namespace(Rc<RefCell<HashMap<Symbol, NamedValue>>>);
 impl IntoIterator for Namespace {
     type Item = (Symbol, NamedValue);
-    type IntoIter = <HashMap::<Symbol, NamedValue> as IntoIterator>::IntoIter;
+    type IntoIter = <HashMap<Symbol, NamedValue> as IntoIterator>::IntoIter;
     fn into_iter(self) -> Self::IntoIter {
         self.0.borrow().clone().into_iter()
     }

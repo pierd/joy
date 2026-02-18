@@ -810,7 +810,8 @@ mod tests {
     #[test]
     fn it_parses_nested_modules() {
         p!(
-            tokens(r#"
+            tokens(
+                r#"
                 MODULE math
                     MODULE ops
                     PUBLIC
@@ -820,7 +821,8 @@ mod tests {
                 PUBLIC
                     square == dup ops.mul
                 END
-            "#),
+            "#
+            ),
             Value::list0(),
             Value::List(vec![
                 Value::list0(),
