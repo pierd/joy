@@ -374,4 +374,25 @@ mod tests {
             vec![4.into()]
         )
     }
+
+    #[test]
+    fn nested_modules() {
+        assert_eq!(
+            run(r#"
+                MODULE math
+                    MODULE ops
+                    PUBLIC
+                        double == 2 *;
+                        mul == *
+                    END
+                PUBLIC
+                    square == dup ops.mul
+                END.
+
+                5 math.ops.double
+                2 math.square
+            "#).unwrap(),
+            vec![10.into(), 4.into()]
+        )
+    }
 }

@@ -225,6 +225,18 @@ impl Module {
             }
         } else {
             match token {
+                Token::Keyword(Keyword::Const)
+                | Token::Keyword(Keyword::Define)
+                | Token::Keyword(Keyword::Libra)
+                | Token::Keyword(Keyword::Inline) => {
+                    Ok(ParserStateResult::forward_to(Module::public_unnamed()))
+                }
+                Token::Keyword(Keyword::Hide) => {
+                    Ok(ParserStateResult::forward_to(Module::private_unnamed()))
+                }
+                Token::Keyword(Keyword::Module) => {
+                    Ok(ParserStateResult::forward_to(Module::named()))
+                }
                 Token::Dot | Token::Keyword(Keyword::End) => {
                     Ok(ParserStateResult::done().with_values(self.drain_values()))
                 }
@@ -791,6 +803,42 @@ mod tests {
             ),
             Value::list0(),
             Value::list1(symbol("foo")),
+            module_symbol()
+        );
+    }
+
+    #[test]
+    fn it_parses_nested_modules() {
+        p!(
+            tokens(r#"
+                MODULE math
+                    MODULE ops
+                    PUBLIC
+                        double == 2 *;
+                        mul == *
+                    END
+                PUBLIC
+                    square == dup ops.mul
+                END
+            "#),
+            Value::list0(),
+            Value::List(vec![
+                Value::list0(),
+                Value::List(vec![
+                    Value::list2(2, symbol("*")),
+                    Value::list1(symbol("double")),
+                    symbol("==").into(),
+                    Value::list1(symbol("*")),
+                    Value::list1(symbol("mul")),
+                    symbol("==").into(),
+                ]),
+                Value::list1(symbol("ops")),
+                module_symbol(),
+                Value::list2(symbol("dup"), value_qualified_access("ops.mul")),
+                Value::list1(symbol("square")),
+                symbol("==").into(),
+            ]),
+            Value::list1(symbol("math")),
             module_symbol()
         );
     }
